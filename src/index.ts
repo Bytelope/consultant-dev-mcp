@@ -695,6 +695,31 @@ function getLandingPageHtml(): string {
     .prompt-copy { font-size: 0.6875rem; color: var(--color-text-muted); margin-top: 0.5rem; }
     .prompt-card.copied .prompt-copy { color: var(--color-primary); }
 
+    /* One-click install */
+    .oneclick { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.5rem; }
+    .oneclick-btn { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem; background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius); text-decoration: none; transition: all 0.2s; cursor: pointer; }
+    .oneclick-btn:hover { border-color: var(--color-primary); }
+    .oneclick-btn svg { width: 28px; height: 28px; flex-shrink: 0; }
+    .oneclick-btn.vscode svg { color: #007acc; }
+    .oneclick-btn.copy svg { color: var(--color-primary); }
+    .oneclick-btn.copied { border-color: var(--color-primary); }
+    .oneclick-text { display: flex; flex-direction: column; gap: 2px; }
+    .oneclick-label { font-size: 0.875rem; font-weight: 600; color: var(--color-text); }
+    .oneclick-hint { font-size: 0.6875rem; color: var(--color-text-muted); }
+    .oneclick-note { text-align: center; font-size: 0.6875rem; color: var(--color-text-muted); margin-bottom: 1rem; }
+
+    /* Architecture */
+    .arch { display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap; padding: 1.5rem 0; }
+    .arch-node { display: flex; flex-direction: column; align-items: center; gap: 0.375rem; }
+    .arch-icon { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; background: var(--color-bg-muted); border: 1px solid var(--color-border); border-radius: var(--radius); }
+    .arch-icon.accent { background: var(--color-primary); border: none; }
+    .arch-icon svg { width: 24px; height: 24px; color: var(--color-text-muted); }
+    .arch-icon.accent svg { color: white; }
+    .arch-label { font-size: 0.75rem; font-weight: 600; color: var(--color-text); }
+    .arch-sub { font-size: 0.625rem; color: var(--color-text-muted); }
+    .arch-arrow { color: var(--color-text-muted); font-size: 0.625rem; text-align: center; }
+    .arch-arrow svg { width: 20px; height: 20px; }
+
     /* Links */
     .links { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; margin-top: 2rem; }
     .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.625rem 1.25rem; border-radius: var(--radius); font-size: 0.875rem; font-weight: 600; text-decoration: none; transition: all 0.15s; }
@@ -708,6 +733,9 @@ function getLandingPageHtml(): string {
       .tabs { gap: 0.25rem; }
       .tab { padding: 0.375rem 0.625rem; font-size: 0.75rem; }
       .prompts-grid { grid-template-columns: 1fr; }
+      .oneclick { grid-template-columns: 1fr; }
+      .arch { flex-direction: column; }
+      .arch-arrow svg { transform: rotate(90deg); }
     }
   </style>
 </head>
@@ -740,6 +768,18 @@ function getLandingPageHtml(): string {
         <iframe id="video-setup" src="https://www.youtube-nocookie.com/embed/olh4NVlSG0s" title="Setup Guide" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe>
       </div>
     </div>
+
+    <div class="oneclick">
+      <a href="vscode:mcp/install?%7B%22name%22%3A%22consultant-jobs%22%2C%22url%22%3A%22https%3A%2F%2Fmcp.consultant.dev%2Fmcp%22%7D" class="oneclick-btn vscode">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>
+        <div class="oneclick-text"><span class="oneclick-label">Install in VS Code</span><span class="oneclick-hint">One-click setup</span></div>
+      </a>
+      <button class="oneclick-btn copy" onclick="copyUrl(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <div class="oneclick-text"><span class="oneclick-label">Copy MCP URL</span><span class="oneclick-hint">https://mcp.consultant.dev/mcp</span></div>
+      </button>
+    </div>
+    <p class="oneclick-note">One-click requires VS Code. Or configure manually below:</p>
 
     <div class="section">
       <h2>Quick Setup</h2>
@@ -797,6 +837,29 @@ function getLandingPageHtml(): string {
     </div>
 
     <div class="section">
+      <h2>How It Works</h2>
+      <div class="arch">
+        <div class="arch-node">
+          <div class="arch-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+          <span class="arch-label">Your IDE</span>
+          <span class="arch-sub">Claude / Cursor</span>
+        </div>
+        <div class="arch-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg><br>HTTPS</div>
+        <div class="arch-node">
+          <div class="arch-icon accent"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
+          <span class="arch-label">MCP Server</span>
+          <span class="arch-sub">mcp.consultant.dev</span>
+        </div>
+        <div class="arch-arrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg><br>API</div>
+        <div class="arch-node">
+          <div class="arch-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+          <span class="arch-label">Job Database</span>
+          <span class="arch-sub">Live data</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
       <h2>Example Prompts</h2>
       <div class="prompts-grid">
         <div class="prompt-card" onclick="copyPrompt(this, 'Find backend developer jobs in Stockholm that match someone with 5 years of Java experience.')">
@@ -851,6 +914,15 @@ function getLandingPageHtml(): string {
       setTimeout(() => {
         el.classList.remove('copied');
         el.querySelector('.prompt-copy').textContent = 'Click to copy';
+      }, 2000);
+    }
+    function copyUrl(el) {
+      navigator.clipboard.writeText('https://mcp.consultant.dev/mcp');
+      el.classList.add('copied');
+      el.querySelector('.oneclick-label').textContent = 'Copied!';
+      setTimeout(() => {
+        el.classList.remove('copied');
+        el.querySelector('.oneclick-label').textContent = 'Copy MCP URL';
       }, 2000);
     }
   </script>
