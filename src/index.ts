@@ -587,6 +587,13 @@ export default {
       }
     }
 
+    // Landing page
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(getLandingPageHtml(), {
+        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
     // Not found
     return Response.json(
       { error: "Not found", endpoints: { mcp: "/mcp (POST)", health: "/health" } },
@@ -594,3 +601,102 @@ export default {
     );
   },
 };
+
+function getLandingPageHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Server - Consultant.dev</title>
+  <link rel="stylesheet" href="https://consultant.dev/theme.css">
+  <link rel="icon" href="https://consultant.dev/favicon.svg" type="image/svg+xml">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-family: var(--font-family); font-size: 15px; line-height: 1.6; color: var(--color-text); background: var(--color-bg-subtle); -webkit-font-smoothing: antialiased; }
+    body { min-height: 100vh; padding: 2rem 1rem; }
+    .container { max-width: 720px; margin: 0 auto; }
+    .hero { text-align: center; margin-bottom: 3rem; }
+    .hero h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.75rem; }
+    .hero p { color: var(--color-text-secondary); font-size: 1.0625rem; }
+    .section { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 1.5rem; margin-bottom: 1.5rem; }
+    .section h2 { font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); margin-bottom: 1rem; }
+    .code-block { background: var(--color-bg-muted); border-radius: var(--radius); padding: 1rem; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; font-size: 0.8125rem; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+    .code-block code { color: var(--color-text); }
+    .tools-list { list-style: none; }
+    .tools-list li { padding: 0.75rem 0; border-bottom: 1px solid var(--color-border-subtle); }
+    .tools-list li:last-child { border-bottom: none; }
+    .tool-name { font-weight: 600; color: var(--color-primary); }
+    .tool-desc { color: var(--color-text-secondary); font-size: 0.875rem; }
+    .links { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.625rem 1.25rem; border-radius: var(--radius); font-size: 0.875rem; font-weight: 600; text-decoration: none; transition: all 0.15s ease; }
+    .btn-primary { background: var(--color-primary); color: white; }
+    .btn-primary:hover { background: var(--color-primary-hover); }
+    .btn-ghost { background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); }
+    .btn-ghost:hover { color: var(--color-primary); border-color: var(--color-primary); }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    .tab { padding: 0.5rem 1rem; border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text-muted); cursor: pointer; font-size: 0.875rem; font-weight: 500; border: none; }
+    .tab.active { background: var(--color-primary); color: white; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .note { font-size: 0.8125rem; color: var(--color-text-muted); margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>Consultant Jobs MCP Server</h1>
+      <p>Connect your AI to Sweden's largest consultant job database</p>
+    </div>
+
+    <div class="section">
+      <h2>Quick Setup</h2>
+      <div class="tabs">
+        <button class="tab active" onclick="showTab('claude')">Claude Desktop</button>
+        <button class="tab" onclick="showTab('chatgpt')">ChatGPT / Web</button>
+      </div>
+      <div id="claude" class="tab-content active">
+        <div class="code-block"><code>npx -y @anthropic-ai/create-mcp add-sse https://mcp.consultant.dev/sse</code></div>
+        <p class="note">Or add manually to claude_desktop_config.json:</p>
+        <div class="code-block"><code>{
+  "mcpServers": {
+    "consultant-jobs": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.consultant.dev/sse"]
+    }
+  }
+}</code></div>
+      </div>
+      <div id="chatgpt" class="tab-content">
+        <p class="note" style="margin-top: 0; margin-bottom: 0.75rem;">Use the SSE endpoint for ChatGPT and other web-based AI tools:</p>
+        <div class="code-block"><code>https://mcp.consultant.dev/sse</code></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Available Tools</h2>
+      <ul class="tools-list">
+        <li><span class="tool-name">search_assignments</span><br><span class="tool-desc">Search jobs by query, location, skills, seniority, and more</span></li>
+        <li><span class="tool-name">get_assignment</span><br><span class="tool-desc">Get full details for a specific job posting</span></li>
+        <li><span class="tool-name">get_available_filters</span><br><span class="tool-desc">Discover available roles, locations, and filter options</span></li>
+        <li><span class="tool-name">get_recent_assignments</span><br><span class="tool-desc">Get the most recently posted jobs</span></li>
+      </ul>
+    </div>
+
+    <div class="links">
+      <a href="https://github.com/jahwag/consultant-jobs-mcp" class="btn btn-primary" target="_blank">GitHub</a>
+      <a href="https://consultant.dev" class="btn btn-ghost">Browse Jobs</a>
+    </div>
+  </div>
+
+  <script>
+    function showTab(id) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector(\`[onclick="showTab('\${id}')"]\`).classList.add('active');
+      document.getElementById(id).classList.add('active');
+    }
+  </script>
+</body>
+</html>`;
+}
