@@ -936,6 +936,7 @@ function getLandingPageHtml(): string {
       }, 2000);
     }
   </script>
+  <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "b13b0b0644e947af87baf5cd6909cf65"}'></script>
 </body>
 </html>`;
 }
