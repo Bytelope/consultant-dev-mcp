@@ -33,6 +33,9 @@ interface Assignment {
 interface SearchResponse {
   success: boolean;
   results: Assignment[];
+  total: number;
+  page: number;
+  totalPages: number; // Backend caps at 10
   facets: {
     roles: { value: string; count: number }[];
     locations: { value: string; count: number }[];
@@ -121,6 +124,7 @@ const SearchArgsSchema = z.object({
   seniority: z.enum(["junior", "regular", "senior", "lead"]).optional(),
   employment_type: z.string().optional(),
   skills: z.array(z.string()).optional(),
+  includeRemote: z.boolean().optional().default(true),
 });
 
 const GetAssignmentArgsSchema = z.object({ id: z.string() });
@@ -130,32 +134,8 @@ const GetRecentArgsSchema = z.object({
 
 // Tool definitions
 const TOOLS = [
-  // ChatGPT-compatible tools (required for ChatGPT Connectors/Deep Research)
   {
     name: "search",
-    description: "Search for IT consultant jobs, freelance assignments, and contract work in the Nordic region. Returns a list of matching job postings.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        query: { type: "string", description: "Search query (e.g., 'Python developer Stockholm', 'DevOps remote')" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "fetch",
-    description: "Get full details of a specific job posting by its ID, including complete description and how to apply.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string", description: "The job ID to fetch" },
-      },
-      required: ["id"],
-    },
-  },
-  // Extended tools for other MCP clients (Claude, etc.)
-  {
-    name: "search_assignments",
     description: "Search for IT consultant jobs in Sweden. Location names like 'Stockholm', 'Göteborg', 'Malmö' are automatically resolved to coordinates for precise filtering within 50km radius. Use this when users ask to find jobs, look for work, search for assignments, or want employment opportunities.",
     inputSchema: {
       type: "object" as const,
@@ -170,8 +150,9 @@ const TOOLS = [
         geo_lon: { type: "number", description: "Longitude for geo-filtering (overrides location)" },
         geo_radius: { type: "number", description: "Search radius in km (default: 50)" },
         seniority: { type: "string", enum: ["junior", "regular", "senior", "lead"], description: "Filter by experience level" },
-        employment_type: { type: "string", description: "Filter by employment type (e.g., 'contractor', 'freelance')" },
+        employment_type: { type: "string", description: "Filter by employment type (e.g., 'contractor', 'permanent')" },
         skills: { type: "array", items: { type: "string" }, description: "Filter by required skills (e.g., ['Python', 'AWS', 'Kubernetes'])" },
+        includeRemote: { type: "boolean", default: true, description: "Include remote jobs in geo-based searches. Set to false to only show on-site jobs." },
       },
     },
   },
@@ -199,138 +180,91 @@ const TOOLS = [
   },
 ];
 
-// ChatGPT-compatible tool handlers (search/fetch with OpenAI's expected format)
-const ChatGPTSearchArgsSchema = z.object({ query: z.string() });
-const ChatGPTFetchArgsSchema = z.object({ id: z.string() });
-
-async function handleChatGPTSearch(args: z.infer<typeof ChatGPTSearchArgsSchema>) {
-  const data = (await fetchAPI("/search", { q: args.query, limit: "10" })) as SearchResponse;
-  if (!data.success || !data.results?.length) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({ results: [] }),
-      }],
-    };
-  }
-
-  // OpenAI expects: { results: [{ id, title, url }] }
-  const results = data.results.map((a) => ({
-    id: a.id,
-    title: `${a.title} at ${a.company} - ${a.location}`,
-    url: a.url || `https://consultant.dev/assignments/${a.id}`,
-  }));
-
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ results }) }],
-  };
-}
-
-async function handleChatGPTFetch(args: z.infer<typeof ChatGPTFetchArgsSchema>) {
+// Tool handlers
+async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
   try {
-    const data = (await fetchAPI(`/job/${args.id}`)) as { job?: Assignment };
-    if (!data.job) {
+    // Ensure coordinates are loaded for geo-filtering
+    await loadLocationCoords();
+
+    const params: Record<string, string> = {
+      sort: args.sort || "quality",
+      page: String(args.page || 1),
+      limit: String(args.limit || 10),
+    };
+
+    // Handle geo-coordinates
+    if (args.geo_lat && args.geo_lon) {
+      // Use explicit coordinates provided by user
+      params.geo_lat = String(args.geo_lat);
+      params.geo_lon = String(args.geo_lon);
+      params.geo_radius = String(args.geo_radius || 50);
+    } else if (args.location) {
+      const normalized = args.location.toLowerCase().trim();
+      // Check if it's "remote" or similar - pass through as string
+      if (normalized === "remote" || normalized === "distans") {
+        params.location = args.location;
+      } else {
+        // Try to resolve location name to coordinates
+        const coords = locationCoords[normalized];
+        if (coords) {
+          params.geo_lat = String(coords.lat);
+          params.geo_lon = String(coords.lon);
+          params.geo_radius = String(args.geo_radius || 50);
+        } else {
+          // Fallback to string location for unknown places
+          params.location = args.location;
+        }
+      }
+    }
+
+    if (args.query) params.q = args.query;
+    if (args.role) params.role = args.role;
+    if (args.seniority) params.seniority = args.seniority;
+    if (args.employment_type) params.type = args.employment_type; // Map to backend's 'type' param
+    if (args.skills?.length) params.skills = args.skills.join(",");
+    if (args.includeRemote === false) params.includeRemote = "false"; // Backend expects string
+
+    const data = (await fetchAPI("/search", params)) as SearchResponse;
+    if (!data.success) return { content: [{ type: "text" as const, text: "Search failed. Please try again." }] };
+
+    if (!data.results?.length) {
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ id: args.id, title: "Not found", text: "Job not found", url: "" }),
+          text: "No exact matches found. Try expanding your location, broadening your search query, or lowering seniority level. Visit https://consultant.dev/alerts to get notified when matching roles appear.",
         }],
       };
     }
-    const a = data.job;
-    // OpenAI expects: { id, title, text, url, metadata }
-    const result = {
+
+    const results = data.results.map((a) => ({
       id: a.id,
-      title: `${a.title} at ${a.company}`,
-      text: `${a.title}\n\nCompany: ${a.company}\nLocation: ${a.location}\nRole: ${a.role || "N/A"}\nSeniority: ${a.seniority_level || "N/A"}\nPosted: ${a.posted?.split("T")[0] || "N/A"}\nDeadline: ${a.deadline?.split("T")[0] || "N/A"}\nSkills: ${a.skills?.join(", ") || "N/A"}\n\n${a.description || "No description available."}`,
-      url: a.url || `https://consultant.dev/assignments/${a.id}`,
-      metadata: {
-        company: a.company,
-        location: a.location,
-        role: a.role,
-        seniority: a.seniority_level,
-        posted: a.posted?.split("T")[0],
-        source: a.source,
-      },
-    };
-    return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
-  } catch {
+      title: a.title,
+      company: a.company,
+      location: a.location,
+      posted: a.posted?.split("T")[0],
+      deadline: a.deadline?.split("T")[0],
+      skills: a.skills?.slice(0, 5),
+    }));
+
+    // Use actual total from backend, not results.length (which is just page size)
+    // Note: Backend caps totalPages at 10
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ id: args.id, title: "Error", text: "Failed to fetch job", url: "" }),
+        text: compact({
+          total: data.total ?? 0,
+          page: args.page || 1,
+          totalPages: data.totalPages ?? 1,
+          hasMore: (args.page || 1) < (data.totalPages ?? 1),
+          results,
+        }),
       }],
     };
+  } catch (error) {
+    console.error("Error in handleSearch:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { content: [{ type: "text" as const, text: `Search failed: ${message}` }] };
   }
-}
-
-// Extended tool handlers (for Claude and other MCP clients)
-async function handleSearchAssignments(args: z.infer<typeof SearchArgsSchema>) {
-  // Ensure coordinates are loaded for geo-filtering
-  await loadLocationCoords();
-
-  const params: Record<string, string> = {
-    sort: args.sort || "quality",
-    page: String(args.page || 1),
-    limit: String(args.limit || 10),
-  };
-
-  // Handle geo-coordinates
-  if (args.geo_lat && args.geo_lon) {
-    // Use explicit coordinates provided by user
-    params.geo_lat = String(args.geo_lat);
-    params.geo_lon = String(args.geo_lon);
-    params.geo_radius = String(args.geo_radius || 50);
-  } else if (args.location) {
-    const normalized = args.location.toLowerCase().trim();
-    // Check if it's "remote" or similar - pass through as string
-    if (normalized === "remote" || normalized === "distans") {
-      params.location = args.location;
-    } else {
-      // Try to resolve location name to coordinates
-      const coords = locationCoords[normalized];
-      if (coords) {
-        params.geo_lat = String(coords.lat);
-        params.geo_lon = String(coords.lon);
-        params.geo_radius = String(args.geo_radius || 50);
-      } else {
-        // Fallback to string location for unknown places
-        params.location = args.location;
-      }
-    }
-  }
-
-  if (args.query) params.q = args.query;
-  if (args.role) params.role = args.role;
-  if (args.seniority) params.seniority = args.seniority;
-  if (args.employment_type) params.employment_type = args.employment_type;
-  if (args.skills?.length) params.skills = args.skills.join(",");
-
-  const data = (await fetchAPI("/search", params)) as SearchResponse;
-  if (!data.success) return { content: [{ type: "text" as const, text: "Search failed." }] };
-
-  if (!data.results?.length) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: "No exact matches found. Try expanding your location, broadening your search query, or lowering seniority level. Visit https://consultant.dev/alerts to get notified when matching roles appear.",
-      }],
-    };
-  }
-
-  const results = data.results.map((a) => ({
-    id: a.id,
-    title: a.title,
-    company: a.company,
-    location: a.location,
-    posted: a.posted?.split("T")[0],
-    deadline: a.deadline?.split("T")[0],
-    skills: a.skills?.slice(0, 5),
-  }));
-
-  return {
-    content: [{ type: "text" as const, text: compact({ total: results.length, page: args.page || 1, results }) }],
-  };
 }
 
 async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>) {
@@ -355,39 +289,56 @@ async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>
       skills: a.skills,
     };
     return { content: [{ type: "text" as const, text: compact(result) }] };
-  } catch {
-    return { content: [{ type: "text" as const, text: `Assignment '${args.id}' not found.` }] };
+  } catch (error) {
+    console.error(`Error fetching assignment ${args.id}:`, error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    if (message.includes("404")) {
+      return { content: [{ type: "text" as const, text: `Assignment '${args.id}' not found.` }] };
+    }
+    return { content: [{ type: "text" as const, text: `Failed to fetch assignment: ${message}` }] };
   }
 }
 
 async function handleGetAvailableFilters() {
-  const data = (await fetchAPI("/search", { limit: "1" })) as SearchResponse;
-  if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch filters." }] };
-  // Return top 10 of each facet to keep response small
-  const filters = {
-    roles: data.facets.roles?.slice(0, 10),
-    locations: data.facets.locations?.slice(0, 10),
-    seniority_levels: data.facets.seniority_levels,
-    employment_types: data.facets.employment_types,
-    companies: data.facets.companies?.slice(0, 10),
-  };
-  return { content: [{ type: "text" as const, text: compact(filters) }] };
+  try {
+    const data = (await fetchAPI("/search", { limit: "1" })) as SearchResponse;
+    if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch filters." }] };
+    // Return top 10 of each facet to keep response small
+    const filters = {
+      roles: data.facets.roles?.slice(0, 10),
+      locations: data.facets.locations?.slice(0, 10),
+      seniority_levels: data.facets.seniority_levels,
+      employment_types: data.facets.employment_types,
+      companies: data.facets.companies?.slice(0, 10),
+    };
+    return { content: [{ type: "text" as const, text: compact(filters) }] };
+  } catch (error) {
+    console.error("Error fetching filters:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { content: [{ type: "text" as const, text: `Failed to fetch filters: ${message}` }] };
+  }
 }
 
 async function handleGetRecentAssignments(args: z.infer<typeof GetRecentArgsSchema>) {
-  const data = (await fetchAPI("/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
-  if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch recent assignments." }] };
+  try {
+    const data = (await fetchAPI("/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
+    if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch recent assignments." }] };
 
-  const results = data.results.map((a) => ({
-    id: a.id,
-    title: a.title,
-    company: a.company,
-    location: a.location,
-    posted: a.posted?.split("T")[0],
-    skills: a.skills?.slice(0, 5),
-  }));
+    const results = data.results.map((a) => ({
+      id: a.id,
+      title: a.title,
+      company: a.company,
+      location: a.location,
+      posted: a.posted?.split("T")[0],
+      skills: a.skills?.slice(0, 5),
+    }));
 
-  return { content: [{ type: "text" as const, text: compact({ results }) }] };
+    return { content: [{ type: "text" as const, text: compact({ results }) }] };
+  } catch (error) {
+    console.error("Error fetching recent assignments:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return { content: [{ type: "text" as const, text: `Failed to fetch recent assignments: ${message}` }] };
+  }
 }
 
 // CORS headers
@@ -433,16 +384,8 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
         let result;
 
         switch (name) {
-          // ChatGPT-compatible tools
           case "search":
-            result = await handleChatGPTSearch(ChatGPTSearchArgsSchema.parse(args));
-            break;
-          case "fetch":
-            result = await handleChatGPTFetch(ChatGPTFetchArgsSchema.parse(args));
-            break;
-          // Extended tools
-          case "search_assignments":
-            result = await handleSearchAssignments(SearchArgsSchema.parse(args || {}));
+            result = await handleSearch(SearchArgsSchema.parse(args || {}));
             break;
           case "get_assignment":
             result = await handleGetAssignment(GetAssignmentArgsSchema.parse(args));
@@ -615,7 +558,6 @@ function escapeHtml(str: string): string {
 
 function getLandingPageHtml(): string {
   const toolsHtml = TOOLS
-    .filter(t => !["search", "fetch"].includes(t.name))
     .map(t => `<li><span class="tool-name">${escapeHtml(t.name)}</span><br><span class="tool-desc">${escapeHtml(t.description.split('.')[0])}.</span></li>`)
     .join('\n        ');
 
