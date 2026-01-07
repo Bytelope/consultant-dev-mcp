@@ -145,7 +145,7 @@ const TOOLS = [
         page: { type: "number", minimum: 1, default: 1 },
         limit: { type: "number", minimum: 1, maximum: 20, default: 10 },
         role: { type: "string", description: "Filter by job role (e.g., 'Backend Developer', 'Data Engineer', 'DevOps Engineer')" },
-        location: { type: "string", description: "City or region name (e.g., 'Stockholm', 'Göteborg', 'Malmö', 'Remote'). Auto-resolved to geo-coordinates for precise 50km radius filtering." },
+        location: { type: "string", description: "City or region name (e.g., 'Stockholm', 'Göteborg', 'Malmö', 'Remote'). Auto-resolved to geo-coordinates. Use geo_radius to adjust search radius (default: 50km)." },
         geo_lat: { type: "number", description: "Latitude for geo-filtering (overrides location)" },
         geo_lon: { type: "number", description: "Longitude for geo-filtering (overrides location)" },
         geo_radius: { type: "number", description: "Search radius in km (default: 50)" },
