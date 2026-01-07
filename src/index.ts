@@ -33,6 +33,9 @@ interface Assignment {
 interface SearchResponse {
   success: boolean;
   results: Assignment[];
+  total: number;
+  page: number;
+  totalPages: number; // Backend caps at 10
   facets: {
     roles: { value: string; count: number }[];
     locations: { value: string; count: number }[];
@@ -121,6 +124,7 @@ const SearchArgsSchema = z.object({
   seniority: z.enum(["junior", "regular", "senior", "lead"]).optional(),
   employment_type: z.string().optional(),
   skills: z.array(z.string()).optional(),
+  includeRemote: z.boolean().optional().default(true),
 });
 
 const GetAssignmentArgsSchema = z.object({ id: z.string() });
@@ -130,32 +134,8 @@ const GetRecentArgsSchema = z.object({
 
 // Tool definitions
 const TOOLS = [
-  // ChatGPT-compatible tools (required for ChatGPT Connectors/Deep Research)
   {
     name: "search",
-    description: "Search for IT consultant jobs, freelance assignments, and contract work in the Nordic region. Returns a list of matching job postings.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        query: { type: "string", description: "Search query (e.g., 'Python developer Stockholm', 'DevOps remote')" },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "fetch",
-    description: "Get full details of a specific job posting by its ID, including complete description and how to apply.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string", description: "The job ID to fetch" },
-      },
-      required: ["id"],
-    },
-  },
-  // Extended tools for other MCP clients (Claude, etc.)
-  {
-    name: "search_assignments",
     description: "Search for IT consultant jobs in Sweden. Location names like 'Stockholm', 'Göteborg', 'Malmö' are automatically resolved to coordinates for precise filtering within 50km radius. Use this when users ask to find jobs, look for work, search for assignments, or want employment opportunities.",
     inputSchema: {
       type: "object" as const,
@@ -170,8 +150,9 @@ const TOOLS = [
         geo_lon: { type: "number", description: "Longitude for geo-filtering (overrides location)" },
         geo_radius: { type: "number", description: "Search radius in km (default: 50)" },
         seniority: { type: "string", enum: ["junior", "regular", "senior", "lead"], description: "Filter by experience level" },
-        employment_type: { type: "string", description: "Filter by employment type (e.g., 'contractor', 'freelance')" },
+        employment_type: { type: "string", description: "Filter by employment type (e.g., 'contractor', 'permanent')" },
         skills: { type: "array", items: { type: "string" }, description: "Filter by required skills (e.g., ['Python', 'AWS', 'Kubernetes'])" },
+        includeRemote: { type: "boolean", default: true, description: "Include remote jobs in geo-based searches. Set to false to only show on-site jobs." },
       },
     },
   },
@@ -199,73 +180,8 @@ const TOOLS = [
   },
 ];
 
-// ChatGPT-compatible tool handlers (search/fetch with OpenAI's expected format)
-const ChatGPTSearchArgsSchema = z.object({ query: z.string() });
-const ChatGPTFetchArgsSchema = z.object({ id: z.string() });
-
-async function handleChatGPTSearch(args: z.infer<typeof ChatGPTSearchArgsSchema>) {
-  const data = (await fetchAPI("/search", { q: args.query, limit: "10" })) as SearchResponse;
-  if (!data.success || !data.results?.length) {
-    return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({ results: [] }),
-      }],
-    };
-  }
-
-  // OpenAI expects: { results: [{ id, title, url }] }
-  const results = data.results.map((a) => ({
-    id: a.id,
-    title: `${a.title} at ${a.company} - ${a.location}`,
-    url: a.url || `https://consultant.dev/assignments/${a.id}`,
-  }));
-
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ results }) }],
-  };
-}
-
-async function handleChatGPTFetch(args: z.infer<typeof ChatGPTFetchArgsSchema>) {
-  try {
-    const data = (await fetchAPI(`/job/${args.id}`)) as { job?: Assignment };
-    if (!data.job) {
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ id: args.id, title: "Not found", text: "Job not found", url: "" }),
-        }],
-      };
-    }
-    const a = data.job;
-    // OpenAI expects: { id, title, text, url, metadata }
-    const result = {
-      id: a.id,
-      title: `${a.title} at ${a.company}`,
-      text: `${a.title}\n\nCompany: ${a.company}\nLocation: ${a.location}\nRole: ${a.role || "N/A"}\nSeniority: ${a.seniority_level || "N/A"}\nPosted: ${a.posted?.split("T")[0] || "N/A"}\nDeadline: ${a.deadline?.split("T")[0] || "N/A"}\nSkills: ${a.skills?.join(", ") || "N/A"}\n\n${a.description || "No description available."}`,
-      url: a.url || `https://consultant.dev/assignments/${a.id}`,
-      metadata: {
-        company: a.company,
-        location: a.location,
-        role: a.role,
-        seniority: a.seniority_level,
-        posted: a.posted?.split("T")[0],
-        source: a.source,
-      },
-    };
-    return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
-  } catch {
-    return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({ id: args.id, title: "Error", text: "Failed to fetch job", url: "" }),
-      }],
-    };
-  }
-}
-
-// Extended tool handlers (for Claude and other MCP clients)
-async function handleSearchAssignments(args: z.infer<typeof SearchArgsSchema>) {
+// Tool handlers
+async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
   // Ensure coordinates are loaded for geo-filtering
   await loadLocationCoords();
 
@@ -303,8 +219,9 @@ async function handleSearchAssignments(args: z.infer<typeof SearchArgsSchema>) {
   if (args.query) params.q = args.query;
   if (args.role) params.role = args.role;
   if (args.seniority) params.seniority = args.seniority;
-  if (args.employment_type) params.employment_type = args.employment_type;
+  if (args.employment_type) params.type = args.employment_type; // Map to backend's 'type' param
   if (args.skills?.length) params.skills = args.skills.join(",");
+  if (args.includeRemote === false) params.includeRemote = "false"; // Backend expects string
 
   const data = (await fetchAPI("/search", params)) as SearchResponse;
   if (!data.success) return { content: [{ type: "text" as const, text: "Search failed." }] };
@@ -328,8 +245,19 @@ async function handleSearchAssignments(args: z.infer<typeof SearchArgsSchema>) {
     skills: a.skills?.slice(0, 5),
   }));
 
+  // Use actual total from backend, not results.length (which is just page size)
+  // Note: Backend caps totalPages at 10
   return {
-    content: [{ type: "text" as const, text: compact({ total: results.length, page: args.page || 1, results }) }],
+    content: [{
+      type: "text" as const,
+      text: compact({
+        total: data.total,
+        page: args.page || 1,
+        totalPages: data.totalPages,
+        hasMore: (args.page || 1) < data.totalPages,
+        results,
+      }),
+    }],
   };
 }
 
@@ -433,16 +361,8 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
         let result;
 
         switch (name) {
-          // ChatGPT-compatible tools
           case "search":
-            result = await handleChatGPTSearch(ChatGPTSearchArgsSchema.parse(args));
-            break;
-          case "fetch":
-            result = await handleChatGPTFetch(ChatGPTFetchArgsSchema.parse(args));
-            break;
-          // Extended tools
-          case "search_assignments":
-            result = await handleSearchAssignments(SearchArgsSchema.parse(args || {}));
+            result = await handleSearch(SearchArgsSchema.parse(args || {}));
             break;
           case "get_assignment":
             result = await handleGetAssignment(GetAssignmentArgsSchema.parse(args));
@@ -615,7 +535,6 @@ function escapeHtml(str: string): string {
 
 function getLandingPageHtml(): string {
   const toolsHtml = TOOLS
-    .filter(t => !["search", "fetch"].includes(t.name))
     .map(t => `<li><span class="tool-name">${escapeHtml(t.name)}</span><br><span class="tool-desc">${escapeHtml(t.description.split('.')[0])}.</span></li>`)
     .join('\n        ');
 
