@@ -1,12 +1,28 @@
 {
-  "name": "mcp-consultant-dev",
+  "name": "mcp-consultant-jobs",
   "version": "1.0.0",
-  "description": "Remote MCP server for consultant.dev on Cloudflare Workers",
+  "description": "MCP server for consultant job search in Sweden. Works with Claude Code and other MCP clients.",
   "type": "module",
+  "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "build": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "jobs",
+    "consultant",
+    "sweden",
+    "cloudflare-workers"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bytelope/consultant-dev-mcp"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.24.3",
