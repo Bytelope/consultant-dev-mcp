@@ -3,6 +3,7 @@ import { z } from "zod";
 // Environment bindings
 interface Env {
   BACKEND: Fetcher;
+  API_PASSWORD: string;
   ENVIRONMENT?: string;
 }
 
@@ -58,7 +59,7 @@ function compact(obj: unknown): string {
 }
 
 // API helper - uses service binding to call backend
-async function fetchAPI(backend: Fetcher, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+async function fetchAPI(backend: Fetcher, apiPassword: string, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
   const queryString = new URLSearchParams(
     Object.entries(params).filter(([, v]) => v)
   ).toString();
@@ -66,7 +67,11 @@ async function fetchAPI(backend: Fetcher, endpoint: string, params: Record<strin
 
   const response = await backend.fetch(
     new Request(`https://backend${path}`, {
-      headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
+      headers: {
+        Authorization: `Basic ${btoa(`mcp:${apiPassword}`)}`,
+        "User-Agent": "MCP-Consultant-Jobs/1.0",
+        Accept: "application/json",
+      },
     })
   );
 
@@ -188,7 +193,7 @@ const TOOLS = [
 ];
 
 // Tool handlers
-async function handleSearch(backend: Fetcher, args: z.infer<typeof SearchArgsSchema>) {
+async function handleSearch(backend: Fetcher, apiPassword: string, args: z.infer<typeof SearchArgsSchema>) {
   try {
     // Ensure coordinates are loaded for geo-filtering
     await loadLocationCoords();
@@ -231,7 +236,7 @@ async function handleSearch(backend: Fetcher, args: z.infer<typeof SearchArgsSch
     if (args.skills?.length) params.skills = args.skills.join(",");
     if (args.includeRemote === false) params.includeRemote = "false"; // Backend expects string
 
-    const data = (await fetchAPI(backend, "/search", params)) as SearchResponse;
+    const data = (await fetchAPI(backend, apiPassword, "/search", params)) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Search failed. Please try again." }] };
 
     if (!data.results?.length) {
@@ -274,9 +279,9 @@ async function handleSearch(backend: Fetcher, args: z.infer<typeof SearchArgsSch
   }
 }
 
-async function handleGetAssignment(backend: Fetcher, args: z.infer<typeof GetAssignmentArgsSchema>) {
+async function handleGetAssignment(backend: Fetcher, apiPassword: string, args: z.infer<typeof GetAssignmentArgsSchema>) {
   try {
-    const data = (await fetchAPI(backend, `/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
+    const data = (await fetchAPI(backend, apiPassword, `/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
     if (!data.job) {
       return { content: [{ type: "text" as const, text: `Assignment '${args.id}' not found.` }] };
     }
@@ -306,9 +311,9 @@ async function handleGetAssignment(backend: Fetcher, args: z.infer<typeof GetAss
   }
 }
 
-async function handleGetAvailableFilters(backend: Fetcher) {
+async function handleGetAvailableFilters(backend: Fetcher, apiPassword: string) {
   try {
-    const data = (await fetchAPI(backend, "/search", { limit: "1" })) as SearchResponse;
+    const data = (await fetchAPI(backend, apiPassword, "/search", { limit: "1" })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch filters." }] };
     // Return top 10 of each facet to keep response small
     const filters = {
@@ -326,9 +331,9 @@ async function handleGetAvailableFilters(backend: Fetcher) {
   }
 }
 
-async function handleGetRecentAssignments(backend: Fetcher, args: z.infer<typeof GetRecentArgsSchema>) {
+async function handleGetRecentAssignments(backend: Fetcher, apiPassword: string, args: z.infer<typeof GetRecentArgsSchema>) {
   try {
-    const data = (await fetchAPI(backend, "/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
+    const data = (await fetchAPI(backend, apiPassword, "/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch recent assignments." }] };
 
     const results = data.results.map((a) => ({
@@ -360,7 +365,7 @@ const corsHeaders = {
 const activeSessions = new Set<string>();
 
 // Handle JSON-RPC requests (stateless - Streamable HTTP transport style)
-async function handleJsonRpc(backend: Fetcher, sessionId: string | null, request: any): Promise<any> {
+async function handleJsonRpc(backend: Fetcher, apiPassword: string, sessionId: string | null, request: any): Promise<any> {
   const { id, method, params } = request;
 
   try {
@@ -392,16 +397,16 @@ async function handleJsonRpc(backend: Fetcher, sessionId: string | null, request
 
         switch (name) {
           case "search":
-            result = await handleSearch(backend, SearchArgsSchema.parse(args || {}));
+            result = await handleSearch(backend, apiPassword, SearchArgsSchema.parse(args || {}));
             break;
           case "get_assignment":
-            result = await handleGetAssignment(backend, GetAssignmentArgsSchema.parse(args));
+            result = await handleGetAssignment(backend, apiPassword, GetAssignmentArgsSchema.parse(args));
             break;
           case "get_available_filters":
-            result = await handleGetAvailableFilters(backend);
+            result = await handleGetAvailableFilters(backend, apiPassword);
             break;
           case "get_recent_assignments":
-            result = await handleGetRecentAssignments(backend, GetRecentArgsSchema.parse(args || {}));
+            result = await handleGetRecentAssignments(backend, apiPassword, GetRecentArgsSchema.parse(args || {}));
             break;
           default:
             return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${name}` } };
@@ -456,10 +461,10 @@ export default {
       });
     }
 
-    // All other routes require backend service binding
-    if (!env.BACKEND) {
+    // All other routes require backend service binding and API password
+    if (!env.BACKEND || !env.API_PASSWORD) {
       return Response.json(
-        { error: "Service unavailable", message: "Backend service binding not configured" },
+        { error: "Service unavailable", message: "Backend service binding or API password not configured" },
         { status: 503, headers: corsHeaders }
       );
     }
@@ -470,7 +475,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(env.BACKEND, sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body);
 
         if (response === null) {
           // Notification - no response body
@@ -539,7 +544,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(env.BACKEND, sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body);
 
         if (response === null) {
           return new Response(null, { status: 204, headers: corsHeaders });
