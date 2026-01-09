@@ -434,7 +434,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Health check
+    // Health check (doesn't require backend)
     if (url.pathname === "/health") {
       return Response.json(
         { status: "healthy", server: "consultant-jobs", version: "1.0.0", tools: TOOLS.map((t) => t.name) },
@@ -442,11 +442,26 @@ export default {
       );
     }
 
-    // Sitemap for SEO
+    // Sitemap (doesn't require backend)
     if (url.pathname === "/sitemap.xml") {
       return new Response(getSitemapXml(), {
         headers: { ...corsHeaders, "Content-Type": "application/xml; charset=utf-8" },
       });
+    }
+
+    // Landing page (doesn't require backend)
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(getLandingPageHtml(), {
+        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    // All other routes require backend service binding
+    if (!env.BACKEND) {
+      return Response.json(
+        { error: "Service unavailable", message: "Backend service binding not configured" },
+        { status: 503, headers: corsHeaders }
+      );
     }
 
     // MCP endpoint - Streamable HTTP transport (stateless JSON-RPC over HTTP)
@@ -542,13 +557,6 @@ export default {
           { status: 400, headers: corsHeaders }
         );
       }
-    }
-
-    // Landing page
-    if (url.pathname === "/" && request.method === "GET") {
-      return new Response(getLandingPageHtml(), {
-        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
-      });
     }
 
     // Not found
