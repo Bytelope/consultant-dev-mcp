@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-const API_BASE_URL = "https://consultant.dev/api";
+// Environment bindings
+interface Env {
+  BACKEND: Fetcher;
+  ENVIRONMENT?: string;
+}
+
 
 interface Assignment {
   id: string;
@@ -52,16 +57,18 @@ function compact(obj: unknown): string {
   return JSON.stringify(obj, (_, v) => (v === null || v === undefined ? undefined : v));
 }
 
-// API helper
-async function fetchAPI(endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
-  const url = new URL(`${API_BASE_URL}${endpoint}`);
-  Object.entries(params).forEach(([key, value]) => {
-    if (value) url.searchParams.append(key, value);
-  });
+// API helper - uses service binding to call backend
+async function fetchAPI(backend: Fetcher, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+  const queryString = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v)
+  ).toString();
+  const path = queryString ? `${endpoint}?${queryString}` : endpoint;
 
-  const response = await fetch(url.toString(), {
-    headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
-  });
+  const response = await backend.fetch(
+    new Request(`https://backend${path}`, {
+      headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
+    })
+  );
 
   if (!response.ok) throw new Error(`API error: ${response.status}`);
   return response.json();
@@ -181,7 +188,7 @@ const TOOLS = [
 ];
 
 // Tool handlers
-async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
+async function handleSearch(backend: Fetcher, args: z.infer<typeof SearchArgsSchema>) {
   try {
     // Ensure coordinates are loaded for geo-filtering
     await loadLocationCoords();
@@ -224,7 +231,7 @@ async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
     if (args.skills?.length) params.skills = args.skills.join(",");
     if (args.includeRemote === false) params.includeRemote = "false"; // Backend expects string
 
-    const data = (await fetchAPI("/search", params)) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", params)) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Search failed. Please try again." }] };
 
     if (!data.results?.length) {
@@ -267,9 +274,9 @@ async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
   }
 }
 
-async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>) {
+async function handleGetAssignment(backend: Fetcher, args: z.infer<typeof GetAssignmentArgsSchema>) {
   try {
-    const data = (await fetchAPI(`/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
+    const data = (await fetchAPI(backend, `/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
     if (!data.job) {
       return { content: [{ type: "text" as const, text: `Assignment '${args.id}' not found.` }] };
     }
@@ -299,9 +306,9 @@ async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>
   }
 }
 
-async function handleGetAvailableFilters() {
+async function handleGetAvailableFilters(backend: Fetcher) {
   try {
-    const data = (await fetchAPI("/search", { limit: "1" })) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", { limit: "1" })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch filters." }] };
     // Return top 10 of each facet to keep response small
     const filters = {
@@ -319,9 +326,9 @@ async function handleGetAvailableFilters() {
   }
 }
 
-async function handleGetRecentAssignments(args: z.infer<typeof GetRecentArgsSchema>) {
+async function handleGetRecentAssignments(backend: Fetcher, args: z.infer<typeof GetRecentArgsSchema>) {
   try {
-    const data = (await fetchAPI("/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch recent assignments." }] };
 
     const results = data.results.map((a) => ({
@@ -353,7 +360,7 @@ const corsHeaders = {
 const activeSessions = new Set<string>();
 
 // Handle JSON-RPC requests (stateless - Streamable HTTP transport style)
-async function handleJsonRpc(sessionId: string | null, request: any): Promise<any> {
+async function handleJsonRpc(backend: Fetcher, sessionId: string | null, request: any): Promise<any> {
   const { id, method, params } = request;
 
   try {
@@ -385,16 +392,16 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
 
         switch (name) {
           case "search":
-            result = await handleSearch(SearchArgsSchema.parse(args || {}));
+            result = await handleSearch(backend, SearchArgsSchema.parse(args || {}));
             break;
           case "get_assignment":
-            result = await handleGetAssignment(GetAssignmentArgsSchema.parse(args));
+            result = await handleGetAssignment(backend, GetAssignmentArgsSchema.parse(args));
             break;
           case "get_available_filters":
-            result = await handleGetAvailableFilters();
+            result = await handleGetAvailableFilters(backend);
             break;
           case "get_recent_assignments":
-            result = await handleGetRecentAssignments(GetRecentArgsSchema.parse(args || {}));
+            result = await handleGetRecentAssignments(backend, GetRecentArgsSchema.parse(args || {}));
             break;
           default:
             return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${name}` } };
@@ -419,7 +426,7 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     // CORS preflight
@@ -427,7 +434,7 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Health check
+    // Health check (doesn't require backend)
     if (url.pathname === "/health") {
       return Response.json(
         { status: "healthy", server: "consultant-jobs", version: "1.0.0", tools: TOOLS.map((t) => t.name) },
@@ -435,11 +442,26 @@ export default {
       );
     }
 
-    // Sitemap for SEO
+    // Sitemap (doesn't require backend)
     if (url.pathname === "/sitemap.xml") {
       return new Response(getSitemapXml(), {
         headers: { ...corsHeaders, "Content-Type": "application/xml; charset=utf-8" },
       });
+    }
+
+    // Landing page (doesn't require backend)
+    if (url.pathname === "/" && request.method === "GET") {
+      return new Response(getLandingPageHtml(), {
+        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    // All other routes require backend service binding
+    if (!env.BACKEND) {
+      return Response.json(
+        { error: "Service unavailable", message: "Backend service binding not configured" },
+        { status: 503, headers: corsHeaders }
+      );
     }
 
     // MCP endpoint - Streamable HTTP transport (stateless JSON-RPC over HTTP)
@@ -448,7 +470,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, sessionId, body);
 
         if (response === null) {
           // Notification - no response body
@@ -517,7 +539,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, sessionId, body);
 
         if (response === null) {
           return new Response(null, { status: 204, headers: corsHeaders });
@@ -535,13 +557,6 @@ export default {
           { status: 400, headers: corsHeaders }
         );
       }
-    }
-
-    // Landing page
-    if (url.pathname === "/" && request.method === "GET") {
-      return new Response(getLandingPageHtml(), {
-        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
-      });
     }
 
     // Not found
