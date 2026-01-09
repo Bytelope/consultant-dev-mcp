@@ -486,7 +486,7 @@ export default {
         const responseSessionId = response._sessionId;
         delete response._sessionId;
 
-        const headers = { ...corsHeaders, "Content-Type": "application/json" };
+        const headers: Record<string, string> = { ...corsHeaders, "Content-Type": "application/json" };
         if (responseSessionId) {
           headers["mcp-session-id"] = responseSessionId;
         }
