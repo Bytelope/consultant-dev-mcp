@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-const API_BASE_URL = "https://consultant.dev/api";
+// Environment bindings
+interface Env {
+  BACKEND: Fetcher;
+  ENVIRONMENT?: string;
+}
+
+// Fetcher type for service binding or fallback
+type BackendFetcher = Fetcher | null;
 
 interface Assignment {
   id: string;
@@ -52,16 +59,27 @@ function compact(obj: unknown): string {
   return JSON.stringify(obj, (_, v) => (v === null || v === undefined ? undefined : v));
 }
 
-// API helper
-async function fetchAPI(endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
-  const url = new URL(`${API_BASE_URL}${endpoint}`);
-  Object.entries(params).forEach(([key, value]) => {
-    if (value) url.searchParams.append(key, value);
-  });
+// API helper - uses service binding in production, falls back to public URL in development
+async function fetchAPI(backend: BackendFetcher, endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+  const queryString = new URLSearchParams(
+    Object.entries(params).filter(([, v]) => v)
+  ).toString();
+  const path = queryString ? `${endpoint}?${queryString}` : endpoint;
 
-  const response = await fetch(url.toString(), {
-    headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
-  });
+  let response: Response;
+  if (backend) {
+    // Production: use service binding
+    response = await backend.fetch(
+      new Request(`https://backend${path}`, {
+        headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
+      })
+    );
+  } else {
+    // Development fallback: direct fetch
+    response = await fetch(`https://api.consultant.dev${path}`, {
+      headers: { "User-Agent": "MCP-Consultant-Jobs/1.0", Accept: "application/json" },
+    });
+  }
 
   if (!response.ok) throw new Error(`API error: ${response.status}`);
   return response.json();
@@ -181,7 +199,7 @@ const TOOLS = [
 ];
 
 // Tool handlers
-async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
+async function handleSearch(backend: BackendFetcher, args: z.infer<typeof SearchArgsSchema>) {
   try {
     // Ensure coordinates are loaded for geo-filtering
     await loadLocationCoords();
@@ -224,7 +242,7 @@ async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
     if (args.skills?.length) params.skills = args.skills.join(",");
     if (args.includeRemote === false) params.includeRemote = "false"; // Backend expects string
 
-    const data = (await fetchAPI("/search", params)) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", params)) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Search failed. Please try again." }] };
 
     if (!data.results?.length) {
@@ -267,9 +285,9 @@ async function handleSearch(args: z.infer<typeof SearchArgsSchema>) {
   }
 }
 
-async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>) {
+async function handleGetAssignment(backend: BackendFetcher, args: z.infer<typeof GetAssignmentArgsSchema>) {
   try {
-    const data = (await fetchAPI(`/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
+    const data = (await fetchAPI(backend, `/job/${args.id}`)) as { job?: Assignment; similarJobs?: Assignment[] };
     if (!data.job) {
       return { content: [{ type: "text" as const, text: `Assignment '${args.id}' not found.` }] };
     }
@@ -299,9 +317,9 @@ async function handleGetAssignment(args: z.infer<typeof GetAssignmentArgsSchema>
   }
 }
 
-async function handleGetAvailableFilters() {
+async function handleGetAvailableFilters(backend: BackendFetcher) {
   try {
-    const data = (await fetchAPI("/search", { limit: "1" })) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", { limit: "1" })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch filters." }] };
     // Return top 10 of each facet to keep response small
     const filters = {
@@ -319,9 +337,9 @@ async function handleGetAvailableFilters() {
   }
 }
 
-async function handleGetRecentAssignments(args: z.infer<typeof GetRecentArgsSchema>) {
+async function handleGetRecentAssignments(backend: BackendFetcher, args: z.infer<typeof GetRecentArgsSchema>) {
   try {
-    const data = (await fetchAPI("/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
+    const data = (await fetchAPI(backend, "/search", { sort: "posted", limit: String(args.limit || 10) })) as SearchResponse;
     if (!data.success) return { content: [{ type: "text" as const, text: "Failed to fetch recent assignments." }] };
 
     const results = data.results.map((a) => ({
@@ -353,7 +371,7 @@ const corsHeaders = {
 const activeSessions = new Set<string>();
 
 // Handle JSON-RPC requests (stateless - Streamable HTTP transport style)
-async function handleJsonRpc(sessionId: string | null, request: any): Promise<any> {
+async function handleJsonRpc(backend: BackendFetcher, sessionId: string | null, request: any): Promise<any> {
   const { id, method, params } = request;
 
   try {
@@ -385,16 +403,16 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
 
         switch (name) {
           case "search":
-            result = await handleSearch(SearchArgsSchema.parse(args || {}));
+            result = await handleSearch(backend, SearchArgsSchema.parse(args || {}));
             break;
           case "get_assignment":
-            result = await handleGetAssignment(GetAssignmentArgsSchema.parse(args));
+            result = await handleGetAssignment(backend, GetAssignmentArgsSchema.parse(args));
             break;
           case "get_available_filters":
-            result = await handleGetAvailableFilters();
+            result = await handleGetAvailableFilters(backend);
             break;
           case "get_recent_assignments":
-            result = await handleGetRecentAssignments(GetRecentArgsSchema.parse(args || {}));
+            result = await handleGetRecentAssignments(backend, GetRecentArgsSchema.parse(args || {}));
             break;
           default:
             return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown tool: ${name}` } };
@@ -419,7 +437,8 @@ async function handleJsonRpc(sessionId: string | null, request: any): Promise<an
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const backend: BackendFetcher = env?.BACKEND ?? null;
     const url = new URL(request.url);
 
     // CORS preflight
@@ -448,7 +467,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(sessionId, body);
+        const response = await handleJsonRpc(backend, sessionId, body);
 
         if (response === null) {
           // Notification - no response body
@@ -517,7 +536,7 @@ export default {
 
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(sessionId, body);
+        const response = await handleJsonRpc(backend, sessionId, body);
 
         if (response === null) {
           return new Response(null, { status: 204, headers: corsHeaders });
