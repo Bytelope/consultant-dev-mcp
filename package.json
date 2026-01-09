@@ -1,7 +1,7 @@
 {
   "name": "mcp-consultant-jobs",
   "version": "1.0.0",
-  "description": "MCP server for IT consultant job search in Sweden. Works with Claude Code and other MCP clients.",
+  "description": "MCP server for consultant job search in Sweden. Works with Claude Code and other MCP clients.",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
