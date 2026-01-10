@@ -1,10 +1,21 @@
 import { z } from "zod";
+import { createClerkClient } from "@clerk/backend";
 
 // Environment bindings
 interface Env {
   BACKEND: Fetcher;
   API_PASSWORD: string;
   ENVIRONMENT?: string;
+  // Clerk configuration
+  CLERK_SECRET_KEY?: string;
+  CLERK_PUBLISHABLE_KEY?: string;
+  CLERK_FAPI_URL?: string; // e.g., "https://clerk.consultant.dev"
+}
+
+// Auth context for authenticated requests
+interface AuthContext {
+  userId: string;
+  sessionId?: string;
 }
 
 
@@ -357,15 +368,125 @@ async function handleGetRecentAssignments(backend: Fetcher, apiPassword: string,
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, mcp-session-id",
+  "Access-Control-Allow-Headers": "Content-Type, mcp-session-id, Authorization",
   "Access-Control-Expose-Headers": "mcp-session-id",
 };
 
 // Simple in-memory session tracking (for protocol compliance)
 const activeSessions = new Set<string>();
 
+// Unified auth validation - handles OAuth tokens, session tokens, and API keys
+async function validateAuth(
+  request: Request,
+  env: Env
+): Promise<AuthContext | null> {
+  // If no Clerk secret configured, skip auth (backwards compatible)
+  if (!env.CLERK_SECRET_KEY) {
+    return null;
+  }
+
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return null;
+  }
+
+  try {
+    const clerkClient = createClerkClient({
+      secretKey: env.CLERK_SECRET_KEY,
+      publishableKey: env.CLERK_PUBLISHABLE_KEY,
+    });
+
+    const requestState = await clerkClient.authenticateRequest(request, {
+      // Accept any token type: session_token, oauth_token, api_key
+      acceptsToken: "any",
+      authorizedParties: [
+        "https://claude.ai",
+        "https://www.claude.ai",
+        "https://mcp.consultant.dev",
+        "https://consultant.dev",
+      ],
+    });
+
+    if (!requestState.isAuthenticated) {
+      console.error("Auth failed:", requestState.reason, requestState.message);
+      return null;
+    }
+
+    const auth = requestState.toAuth();
+
+    // Handle different token types - API keys use 'subject', session tokens use 'userId'
+    const userId = 'userId' in auth ? auth.userId : ('subject' in auth ? auth.subject : null);
+    const sessionId = 'sessionId' in auth ? auth.sessionId : undefined;
+
+    return {
+      userId: userId || "unknown",
+      sessionId: sessionId,
+    };
+  } catch (error) {
+    console.error("Auth validation failed:", error);
+    return null;
+  }
+}
+
+// Generate 401 response with WWW-Authenticate header per MCP spec
+function unauthorizedResponse(env: Env): Response {
+  const resourceUrl = "https://mcp.consultant.dev/.well-known/oauth-protected-resource";
+  return new Response(
+    JSON.stringify({ error: "Unauthorized", message: "Bearer token required" }),
+    {
+      status: 401,
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "application/json",
+        "WWW-Authenticate": `Bearer resource="${resourceUrl}"`,
+      },
+    }
+  );
+}
+
+// OAuth Protected Resource Metadata (RFC 9728)
+function getProtectedResourceMetadata(env: Env): object {
+  const authServer = env.CLERK_FAPI_URL || "https://clerk.consultant.dev";
+  return {
+    resource: "https://mcp.consultant.dev",
+    authorization_servers: [authServer],
+    scopes_supported: ["openid", "profile", "email"],
+  };
+}
+
+// Log usage to backend (fire-and-forget)
+async function logUsage(
+  backend: Fetcher,
+  apiPassword: string,
+  userId: string,
+  toolName: string
+): Promise<void> {
+  try {
+    await backend.fetch(
+      new Request("https://backend/api/mcp/usage", {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`mcp:${apiPassword}`)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userId, tool: toolName }),
+      })
+    );
+  } catch (error) {
+    // Fire-and-forget - don't fail the request if logging fails
+    console.error("Failed to log usage:", error);
+  }
+}
+
 // Handle JSON-RPC requests (stateless - Streamable HTTP transport style)
-async function handleJsonRpc(backend: Fetcher, apiPassword: string, sessionId: string | null, request: any): Promise<any> {
+async function handleJsonRpc(
+  backend: Fetcher,
+  apiPassword: string,
+  sessionId: string | null,
+  request: any,
+  auth: AuthContext | null,
+  env: Env
+): Promise<any> {
   const { id, method, params } = request;
 
   try {
@@ -394,6 +515,11 @@ async function handleJsonRpc(backend: Fetcher, apiPassword: string, sessionId: s
       case "tools/call": {
         const { name, arguments: args } = params;
         let result;
+
+        // Log usage if authenticated
+        if (auth?.userId) {
+          logUsage(backend, apiPassword, auth.userId, name);
+        }
 
         switch (name) {
           case "search":
@@ -447,6 +573,30 @@ export default {
       );
     }
 
+    // OAuth Protected Resource Metadata (RFC 9728)
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return Response.json(getProtectedResourceMetadata(env), {
+        headers: { ...corsHeaders, "Cache-Control": "public, max-age=3600" },
+      });
+    }
+
+    // Proxy OAuth Authorization Server Metadata from Clerk
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      const clerkFapiUrl = env.CLERK_FAPI_URL || "https://clerk.consultant.dev";
+      try {
+        const resp = await fetch(`${clerkFapiUrl}/.well-known/oauth-authorization-server`);
+        const metadata = await resp.json();
+        return Response.json(metadata, {
+          headers: { ...corsHeaders, "Cache-Control": "public, max-age=3600" },
+        });
+      } catch (error) {
+        return Response.json(
+          { error: "Failed to fetch authorization server metadata" },
+          { status: 502, headers: corsHeaders }
+        );
+      }
+    }
+
     // Sitemap (doesn't require backend)
     if (url.pathname === "/sitemap.xml") {
       return new Response(getSitemapXml(), {
@@ -456,9 +606,45 @@ export default {
 
     // Landing page (doesn't require backend)
     if (url.pathname === "/" && request.method === "GET") {
-      return new Response(getLandingPageHtml(), {
+      return new Response(getLandingPageHtml(env), {
         headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
       });
+    }
+
+    // Dashboard page (auth handled client-side via Clerk.js)
+    if (url.pathname === "/dashboard" && request.method === "GET") {
+      return new Response(getDashboardHtml(env), {
+        headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    // Usage stats API for dashboard (requires auth)
+    if (url.pathname === "/api/usage" && request.method === "GET") {
+      const auth = await validateAuth(request, env);
+      if (!auth) {
+        return Response.json(
+          { error: "Unauthorized" },
+          { status: 401, headers: corsHeaders }
+        );
+      }
+
+      // Fetch from backend
+      try {
+        const backendResponse = await env.BACKEND.fetch(
+          new Request(`https://backend/api/mcp/usage/${auth.userId}`, {
+            headers: {
+              Authorization: `Basic ${btoa(`mcp:${env.API_PASSWORD}`)}`,
+            },
+          })
+        );
+        const data = await backendResponse.json();
+        return Response.json(data, { headers: corsHeaders });
+      } catch (error) {
+        return Response.json(
+          { error: "Failed to fetch usage", total: 0, byTool: [] },
+          { status: 500, headers: corsHeaders }
+        );
+      }
     }
 
     // All other routes require backend service binding and API password
@@ -473,9 +659,17 @@ export default {
     if (url.pathname === "/mcp" && request.method === "POST") {
       const sessionId = request.headers.get("mcp-session-id");
 
+      // Validate OAuth token if Clerk is configured
+      const auth = await validateAuth(request, env);
+
+      // Require auth when CLERK_SECRET_KEY is set
+      if (env.CLERK_SECRET_KEY && !auth) {
+        return unauthorizedResponse(env);
+      }
+
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body, auth, env);
 
         if (response === null) {
           // Notification - no response body
@@ -542,9 +736,17 @@ export default {
     if (url.pathname.startsWith("/sse/message/") && request.method === "POST") {
       const sessionId = url.pathname.split("/").pop() || null;
 
+      // Validate OAuth token if Clerk is configured
+      const auth = await validateAuth(request, env);
+
+      // Require auth when CLERK_SECRET_KEY is set
+      if (env.CLERK_SECRET_KEY && !auth) {
+        return unauthorizedResponse(env);
+      }
+
       try {
         const body = await request.json();
-        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body);
+        const response = await handleJsonRpc(env.BACKEND, env.API_PASSWORD, sessionId, body, auth, env);
 
         if (response === null) {
           return new Response(null, { status: 204, headers: corsHeaders });
@@ -576,7 +778,8 @@ function escapeHtml(str: string): string {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function getLandingPageHtml(): string {
+function getLandingPageHtml(env: Env): string {
+  const clerkPublishableKey = env.CLERK_PUBLISHABLE_KEY || '';
   const toolsHtml = TOOLS
     .map(t => `<li><span class="tool-name">${escapeHtml(t.name)}</span><br><span class="tool-desc">${escapeHtml(t.description.split('.')[0])}.</span></li>`)
     .join('\n        ');
@@ -708,10 +911,67 @@ function getLandingPageHtml(): string {
       .oneclick { grid-template-columns: 1fr; }
       .arch { flex-direction: column; }
       .arch-arrow svg { transform: rotate(90deg); }
+      .navbar-inner { padding: 0 0.5rem; }
+    }
+
+    /* Navbar */
+    .navbar {
+      position: sticky;
+      top: 0;
+      background: var(--color-bg);
+      border-bottom: 1px solid var(--color-border);
+      z-index: 100;
+      padding: 0.75rem 1rem;
+      margin: -2rem -1rem 2rem -1rem;
+    }
+    .navbar-inner {
+      max-width: 800px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .navbar-logo {
+      font-weight: 600;
+      text-decoration: none;
+      color: var(--color-text);
+      font-size: 0.9375rem;
+    }
+    .navbar-logo .logo-parent { color: var(--color-text-muted); }
+    .navbar-logo .logo-chevron { color: var(--color-primary); margin: 0 0.25rem; }
+    .navbar-logo .logo-service { color: var(--color-primary); }
+    .navbar-auth {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .navbar-auth .btn { padding: 0.5rem 1rem; font-size: 0.8125rem; }
+    .user-menu {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .user-email {
+      font-size: 0.8125rem;
+      color: var(--color-text-muted);
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
   </style>
 </head>
 <body>
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="/" class="navbar-logo">
+        <span class="logo-parent">consultant.dev</span><span class="logo-chevron">›</span><span class="logo-service">mcp</span>
+      </a>
+      <div class="navbar-auth" id="auth-buttons">
+        <span class="user-email" style="color: var(--color-text-muted); font-size: 0.75rem;">Loading...</span>
+      </div>
+    </div>
+  </nav>
   <div class="container">
     <div class="hero">
       <div class="badge"><span class="badge-dot"></span>MCP Server</div>
@@ -898,7 +1158,307 @@ function getLandingPageHtml(): string {
       }, 2000);
     }
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script>
+  <script>
+    (function() {
+      var publishableKey = '${escapeHtml(clerkPublishableKey)}';
+      if (!publishableKey) {
+        document.getElementById('auth-buttons').textContent = '';
+        return;
+      }
+
+      var clerk = new Clerk(publishableKey);
+      clerk.load().then(function() {
+        var authButtons = document.getElementById('auth-buttons');
+        authButtons.textContent = '';
+
+        if (clerk.user) {
+          var dashboardLink = document.createElement('a');
+          dashboardLink.href = '/dashboard';
+          dashboardLink.className = 'btn btn-ghost';
+          dashboardLink.textContent = 'Dashboard';
+
+          var signOutBtn = document.createElement('button');
+          signOutBtn.className = 'btn btn-ghost';
+          signOutBtn.textContent = 'Sign Out';
+          signOutBtn.onclick = function() { clerk.signOut(); };
+
+          authButtons.appendChild(dashboardLink);
+          authButtons.appendChild(signOutBtn);
+        } else {
+          var signInBtn = document.createElement('button');
+          signInBtn.className = 'btn btn-primary';
+          signInBtn.textContent = 'Sign In';
+          signInBtn.onclick = function() { clerk.openSignIn(); };
+
+          authButtons.appendChild(signInBtn);
+        }
+      }).catch(function(err) {
+        console.error('Clerk load error:', err);
+        document.getElementById('auth-buttons').textContent = '';
+      });
+    })();
+  </script>
   <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "b13b0b0644e947af87baf5cd6909cf65"}'></script>
+</body>
+</html>`;
+}
+
+function getDashboardHtml(env: Env): string {
+  const clerkPublishableKey = env.CLERK_PUBLISHABLE_KEY || '';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - MCP Server</title>
+  <link rel="icon" href="https://consultant.dev/favicon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --color-bg: #ffffff;
+      --color-bg-subtle: #f6f9fc;
+      --color-bg-muted: #edf2f7;
+      --color-text: #0a2540;
+      --color-text-secondary: #425466;
+      --color-text-muted: #566678;
+      --color-primary: #067267;
+      --color-primary-hover: #055d54;
+      --color-border: #e3e8ee;
+      --color-card: #ffffff;
+      --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --radius: 8px;
+      --radius-lg: 12px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-family: var(--font-family); font-size: 15px; line-height: 1.6; color: var(--color-text); background: var(--color-bg-subtle); -webkit-font-smoothing: antialiased; }
+    body { min-height: 100vh; padding: 2rem 1rem; }
+    .container { max-width: 800px; margin: 0 auto; }
+    .navbar { position: sticky; top: 0; background: var(--color-bg); border-bottom: 1px solid var(--color-border); z-index: 100; padding: 0.75rem 1rem; margin: -2rem -1rem 2rem -1rem; }
+    .navbar-inner { max-width: 800px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
+    .navbar-logo { font-weight: 600; text-decoration: none; color: var(--color-text); font-size: 0.9375rem; }
+    .navbar-logo .logo-parent { color: var(--color-text-muted); }
+    .navbar-logo .logo-chevron { color: var(--color-primary); margin: 0 0.25rem; }
+    .navbar-logo .logo-service { color: var(--color-primary); }
+    .navbar-auth { display: flex; gap: 0.5rem; align-items: center; }
+    .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.625rem 1.25rem; border-radius: var(--radius); font-size: 0.875rem; font-weight: 600; text-decoration: none; transition: all 0.15s; cursor: pointer; border: none; }
+    .btn-primary { background: var(--color-primary); color: white; }
+    .btn-primary:hover { background: var(--color-primary-hover); }
+    .btn-ghost { background: transparent; color: var(--color-text-muted); border: 1px solid var(--color-border); }
+    .btn-ghost:hover { color: var(--color-primary); border-color: var(--color-primary); }
+    .page-header { margin-bottom: 2rem; }
+    .page-header h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .page-header p { color: var(--color-text-secondary); }
+    .card { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 1.5rem; margin-bottom: 1.5rem; }
+    .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+    .card p { color: var(--color-text-secondary); margin-bottom: 1rem; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; }
+    .stat-item { text-align: center; padding: 1rem; background: var(--color-bg-subtle); border-radius: var(--radius); }
+    .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--color-primary); }
+    .stat-label { font-size: 0.75rem; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .code-block { background: #0d1117; border-radius: var(--radius); padding: 1rem; font-family: 'SF Mono', Monaco, monospace; font-size: 0.8125rem; overflow-x: auto; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; }
+    .auth-required { text-align: center; padding: 3rem 1rem; }
+    .auth-required h2 { margin-bottom: 1rem; }
+    .auth-required p { color: var(--color-text-secondary); margin-bottom: 1.5rem; }
+    .loading { color: var(--color-text-muted); }
+  </style>
+</head>
+<body>
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="/" class="navbar-logo">
+        <span class="logo-parent">consultant.dev</span><span class="logo-chevron">›</span><span class="logo-service">mcp</span>
+      </a>
+      <div class="navbar-auth" id="auth-buttons">
+        <span style="color: var(--color-text-muted); font-size: 0.75rem;">Loading...</span>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div id="dashboard-content">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script>
+  <script>
+    (function() {
+      var publishableKey = '${escapeHtml(clerkPublishableKey)}';
+      if (!publishableKey) {
+        document.getElementById('dashboard-content').textContent = 'Authentication not configured';
+        document.getElementById('auth-buttons').textContent = '';
+        return;
+      }
+
+      var clerk = new Clerk(publishableKey);
+      clerk.load().then(function() {
+        var authButtons = document.getElementById('auth-buttons');
+        authButtons.textContent = '';
+
+        if (clerk.user) {
+          // Auth buttons
+          var homeLink = document.createElement('a');
+          homeLink.href = '/';
+          homeLink.className = 'btn btn-ghost';
+          homeLink.textContent = 'Home';
+
+          var signOutBtn = document.createElement('button');
+          signOutBtn.className = 'btn btn-ghost';
+          signOutBtn.textContent = 'Sign Out';
+          signOutBtn.onclick = function() { clerk.signOut().then(function() { window.location.href = '/'; }); };
+
+          authButtons.appendChild(homeLink);
+          authButtons.appendChild(signOutBtn);
+
+          // Show dashboard
+          renderDashboard(clerk);
+        } else {
+          // Not signed in - show auth required
+          var content = document.getElementById('dashboard-content');
+          content.textContent = '';
+
+          var authRequired = document.createElement('div');
+          authRequired.className = 'auth-required';
+
+          var h2 = document.createElement('h2');
+          h2.textContent = 'Sign in to access your dashboard';
+
+          var p = document.createElement('p');
+          p.textContent = 'View your usage statistics and manage API keys.';
+
+          var signInBtn = document.createElement('button');
+          signInBtn.className = 'btn btn-primary';
+          signInBtn.textContent = 'Sign In';
+          signInBtn.onclick = function() { clerk.openSignIn(); };
+
+          authRequired.appendChild(h2);
+          authRequired.appendChild(p);
+          authRequired.appendChild(signInBtn);
+          content.appendChild(authRequired);
+
+          // Update navbar
+          var navSignInBtn = document.createElement('button');
+          navSignInBtn.className = 'btn btn-primary';
+          navSignInBtn.textContent = 'Sign In';
+          navSignInBtn.onclick = function() { clerk.openSignIn(); };
+          authButtons.appendChild(navSignInBtn);
+        }
+      }).catch(function(err) {
+        console.error('Clerk load error:', err);
+        document.getElementById('dashboard-content').textContent = 'Failed to load authentication';
+        document.getElementById('auth-buttons').textContent = '';
+      });
+
+      function renderDashboard(clerk) {
+        var content = document.getElementById('dashboard-content');
+        content.textContent = '';
+
+        // Page header
+        var header = document.createElement('div');
+        header.className = 'page-header';
+        var h1 = document.createElement('h1');
+        h1.textContent = 'Dashboard';
+        var welcomeP = document.createElement('p');
+        welcomeP.textContent = 'Welcome, ' + (clerk.user.firstName || clerk.user.emailAddresses[0].emailAddress);
+        header.appendChild(h1);
+        header.appendChild(welcomeP);
+        content.appendChild(header);
+
+        // Usage stats card
+        var usageCard = document.createElement('div');
+        usageCard.className = 'card';
+        var usageH2 = document.createElement('h2');
+        usageH2.textContent = 'Usage (Last 30 Days)';
+        var statsGrid = document.createElement('div');
+        statsGrid.className = 'stats-grid';
+        statsGrid.id = 'stats-grid';
+        var loadingStats = document.createElement('div');
+        loadingStats.className = 'loading';
+        loadingStats.textContent = 'Loading usage stats...';
+        statsGrid.appendChild(loadingStats);
+        usageCard.appendChild(usageH2);
+        usageCard.appendChild(statsGrid);
+        content.appendChild(usageCard);
+
+        // Fetch usage stats
+        clerk.session.getToken().then(function(token) {
+          return fetch('/api/usage', {
+            headers: { 'Authorization': 'Bearer ' + token }
+          });
+        }).then(function(res) {
+          if (!res.ok) throw new Error('Failed to fetch');
+          return res.json();
+        }).then(function(data) {
+          var grid = document.getElementById('stats-grid');
+          grid.textContent = '';
+
+          var totalItem = document.createElement('div');
+          totalItem.className = 'stat-item';
+          var totalValue = document.createElement('div');
+          totalValue.className = 'stat-value';
+          totalValue.textContent = data.total || 0;
+          var totalLabel = document.createElement('div');
+          totalLabel.className = 'stat-label';
+          totalLabel.textContent = 'Total Calls';
+          totalItem.appendChild(totalValue);
+          totalItem.appendChild(totalLabel);
+          grid.appendChild(totalItem);
+
+          if (data.byTool && data.byTool.length > 0) {
+            data.byTool.forEach(function(tool) {
+              var item = document.createElement('div');
+              item.className = 'stat-item';
+              var value = document.createElement('div');
+              value.className = 'stat-value';
+              value.textContent = tool.count;
+              var label = document.createElement('div');
+              label.className = 'stat-label';
+              label.textContent = tool.tool_name;
+              item.appendChild(value);
+              item.appendChild(label);
+              grid.appendChild(item);
+            });
+          }
+        }).catch(function(err) {
+          console.error('Usage fetch error:', err);
+          var grid = document.getElementById('stats-grid');
+          grid.textContent = 'No usage data yet';
+        });
+
+        // API keys card
+        var apiCard = document.createElement('div');
+        apiCard.className = 'card';
+        var apiH2 = document.createElement('h2');
+        apiH2.textContent = 'API Keys';
+        var apiP = document.createElement('p');
+        apiP.textContent = 'Generate API keys for CLI access (Claude Code, etc.)';
+        var apiBtn = document.createElement('button');
+        apiBtn.className = 'btn btn-primary';
+        apiBtn.textContent = 'Manage API Keys';
+        apiBtn.onclick = function() { clerk.openUserProfile(); };
+        apiCard.appendChild(apiH2);
+        apiCard.appendChild(apiP);
+        apiCard.appendChild(apiBtn);
+        content.appendChild(apiCard);
+
+        // CLI setup card
+        var cliCard = document.createElement('div');
+        cliCard.className = 'card';
+        var cliH2 = document.createElement('h2');
+        cliH2.textContent = 'CLI Setup';
+        var cliP = document.createElement('p');
+        cliP.textContent = 'Use your API key with Claude Code:';
+        var cliCode = document.createElement('div');
+        cliCode.className = 'code-block';
+        cliCode.textContent = 'claude mcp add -t http consultant-jobs https://mcp.consultant.dev/mcp --header "Authorization: Bearer YOUR_API_KEY"';
+        cliCard.appendChild(cliH2);
+        cliCard.appendChild(cliP);
+        cliCard.appendChild(cliCode);
+        content.appendChild(cliCard);
+      }
+    })();
+  </script>
 </body>
 </html>`;
 }
