@@ -780,6 +780,7 @@ function escapeHtml(str: string): string {
 
 function getLandingPageHtml(env: Env): string {
   const clerkPublishableKey = env.CLERK_PUBLISHABLE_KEY || '';
+  const clerkFapiUrl = env.CLERK_FAPI_URL || 'https://clerk.consultant.dev';
   const toolsHtml = TOOLS
     .map(t => `<li><span class="tool-name">${escapeHtml(t.name)}</span><br><span class="tool-desc">${escapeHtml(t.description.split('.')[0])}.</span></li>`)
     .join('\n        ');
@@ -1158,21 +1159,26 @@ function getLandingPageHtml(env: Env): string {
       }, 2000);
     }
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script>
+  <script
+    async
+    crossorigin="anonymous"
+    data-clerk-publishable-key="${escapeHtml(clerkPublishableKey)}"
+    src="${escapeHtml(clerkFapiUrl)}/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    type="text/javascript"
+  ></script>
   <script>
-    (function() {
-      var publishableKey = '${escapeHtml(clerkPublishableKey)}';
-      if (!publishableKey) {
+    window.addEventListener('load', async function() {
+      if (!window.Clerk) {
         document.getElementById('auth-buttons').textContent = '';
         return;
       }
 
-      var clerk = new Clerk(publishableKey);
-      clerk.load().then(function() {
+      try {
+        await window.Clerk.load();
         var authButtons = document.getElementById('auth-buttons');
         authButtons.textContent = '';
 
-        if (clerk.user) {
+        if (window.Clerk.user) {
           var dashboardLink = document.createElement('a');
           dashboardLink.href = '/dashboard';
           dashboardLink.className = 'btn btn-ghost';
@@ -1181,7 +1187,7 @@ function getLandingPageHtml(env: Env): string {
           var signOutBtn = document.createElement('button');
           signOutBtn.className = 'btn btn-ghost';
           signOutBtn.textContent = 'Sign Out';
-          signOutBtn.onclick = function() { clerk.signOut(); };
+          signOutBtn.onclick = function() { window.Clerk.signOut(); };
 
           authButtons.appendChild(dashboardLink);
           authButtons.appendChild(signOutBtn);
@@ -1189,15 +1195,15 @@ function getLandingPageHtml(env: Env): string {
           var signInBtn = document.createElement('button');
           signInBtn.className = 'btn btn-primary';
           signInBtn.textContent = 'Sign In';
-          signInBtn.onclick = function() { clerk.openSignIn(); };
+          signInBtn.onclick = function() { window.Clerk.openSignIn(); };
 
           authButtons.appendChild(signInBtn);
         }
-      }).catch(function(err) {
+      } catch (err) {
         console.error('Clerk load error:', err);
         document.getElementById('auth-buttons').textContent = '';
-      });
-    })();
+      }
+    });
   </script>
   <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "b13b0b0644e947af87baf5cd6909cf65"}'></script>
 </body>
@@ -1206,6 +1212,7 @@ function getLandingPageHtml(env: Env): string {
 
 function getDashboardHtml(env: Env): string {
   const clerkPublishableKey = env.CLERK_PUBLISHABLE_KEY || '';
+  const clerkFapiUrl = env.CLERK_FAPI_URL || 'https://clerk.consultant.dev';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1281,18 +1288,24 @@ function getDashboardHtml(env: Env): string {
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"></script>
+  <script
+    async
+    crossorigin="anonymous"
+    data-clerk-publishable-key="${escapeHtml(clerkPublishableKey)}"
+    src="${escapeHtml(clerkFapiUrl)}/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
+    type="text/javascript"
+  ></script>
   <script>
-    (function() {
-      var publishableKey = '${escapeHtml(clerkPublishableKey)}';
-      if (!publishableKey) {
+    window.addEventListener('load', async function() {
+      if (!window.Clerk) {
         document.getElementById('dashboard-content').textContent = 'Authentication not configured';
         document.getElementById('auth-buttons').textContent = '';
         return;
       }
 
-      var clerk = new Clerk(publishableKey);
-      clerk.load().then(function() {
+      try {
+        await window.Clerk.load();
+        var clerk = window.Clerk;
         var authButtons = document.getElementById('auth-buttons');
         authButtons.textContent = '';
 
@@ -1344,11 +1357,11 @@ function getDashboardHtml(env: Env): string {
           navSignInBtn.onclick = function() { clerk.openSignIn(); };
           authButtons.appendChild(navSignInBtn);
         }
-      }).catch(function(err) {
+      } catch (err) {
         console.error('Clerk load error:', err);
         document.getElementById('dashboard-content').textContent = 'Failed to load authentication';
         document.getElementById('auth-buttons').textContent = '';
-      });
+      }
 
       function renderDashboard(clerk) {
         var content = document.getElementById('dashboard-content');
@@ -1457,7 +1470,7 @@ function getDashboardHtml(env: Env): string {
         cliCard.appendChild(cliCode);
         content.appendChild(cliCard);
       }
-    })();
+    });
   </script>
 </body>
 </html>`;
